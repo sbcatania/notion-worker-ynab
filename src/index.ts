@@ -241,6 +241,129 @@ const humanizeGoalType = (type: string | null): string | null => {
 	return map[type] ?? type;
 };
 
+// Regex matching a leading emoji (including compound/ZWJ sequences and flag pairs).
+const LEADING_EMOJI_RE =
+	/^(\p{Emoji_Presentation}|\p{Emoji}\uFE0F)(\u200D(\p{Emoji_Presentation}|\p{Emoji}\uFE0F))*/u;
+
+/**
+ * Extract a leading emoji from a string, returning the emoji and the
+ * remainder with leading whitespace trimmed.
+ */
+const extractLeadingEmoji = (
+	text: string,
+): { emoji: string; rest: string } | null => {
+	const match = text.match(LEADING_EMOJI_RE);
+	if (!match) return null;
+	const emoji = match[0];
+	const rest = text.slice(emoji.length).trimStart();
+	// Only count it if there's actual text after the emoji
+	if (!rest) return null;
+	return { emoji, rest };
+};
+
+/**
+ * Map well-known payee names to domain names for logo lookup.
+ * Clearbit Logo API: https://logo.clearbit.com/:domain
+ */
+const PAYEE_DOMAINS: Record<string, string> = {
+	amazon: "amazon.com",
+	"amazon.com": "amazon.com",
+	apple: "apple.com",
+	spotify: "spotify.com",
+	netflix: "netflix.com",
+	hulu: "hulu.com",
+	"disney+": "disneyplus.com",
+	uber: "uber.com",
+	lyft: "lyft.com",
+	"uber eats": "ubereats.com",
+	doordash: "doordash.com",
+	grubhub: "grubhub.com",
+	starbucks: "starbucks.com",
+	"chick-fil-a": "chick-fil-a.com",
+	chipotle: "chipotle.com",
+	walmart: "walmart.com",
+	target: "target.com",
+	costco: "costco.com",
+	"whole foods": "wholefoods.com",
+	trader: "traderjoes.com",
+	"trader joe": "traderjoes.com",
+	"trader joe's": "traderjoes.com",
+	venmo: "venmo.com",
+	paypal: "paypal.com",
+	"cash app": "cash.app",
+	zelle: "zellepay.com",
+	google: "google.com",
+	microsoft: "microsoft.com",
+	github: "github.com",
+	steam: "store.steampowered.com",
+	twitch: "twitch.tv",
+	youtube: "youtube.com",
+	"t-mobile": "t-mobile.com",
+	verizon: "verizon.com",
+	"at&t": "att.com",
+	comcast: "comcast.com",
+	xfinity: "xfinity.com",
+	"state farm": "statefarm.com",
+	geico: "geico.com",
+	"progressive": "progressive.com",
+	chase: "chase.com",
+	"wells fargo": "wellsfargo.com",
+	"bank of america": "bankofamerica.com",
+	citi: "citi.com",
+	citibank: "citi.com",
+	"capital one": "capitalone.com",
+	discover: "discover.com",
+	"american express": "americanexpress.com",
+	amex: "americanexpress.com",
+	stripe: "stripe.com",
+	shopify: "shopify.com",
+	etsy: "etsy.com",
+	airbnb: "airbnb.com",
+	"best buy": "bestbuy.com",
+	"home depot": "homedepot.com",
+	"lowe's": "lowes.com",
+	lowes: "lowes.com",
+	ikea: "ikea.com",
+	instacart: "instacart.com",
+	kroger: "kroger.com",
+	cvs: "cvs.com",
+	walgreens: "walgreens.com",
+	"rite aid": "riteaid.com",
+	mcdonald: "mcdonalds.com",
+	"mcdonald's": "mcdonalds.com",
+	"burger king": "bk.com",
+	wendy: "wendys.com",
+	"wendy's": "wendys.com",
+	"taco bell": "tacobell.com",
+	"dunkin": "dunkindonuts.com",
+	"dunkin'": "dunkindonuts.com",
+	notion: "notion.so",
+	slack: "slack.com",
+	zoom: "zoom.us",
+	dropbox: "dropbox.com",
+	adobe: "adobe.com",
+	peloton: "onepeloton.com",
+};
+
+/**
+ * Try to find a logo URL for a payee name.
+ * Returns a Clearbit logo URL if a known domain match is found.
+ */
+const getPayeeLogoUrl = (payeeName: string): string | null => {
+	const lower = payeeName.toLowerCase().trim();
+	// Direct match
+	if (PAYEE_DOMAINS[lower]) {
+		return `https://logo.clearbit.com/${PAYEE_DOMAINS[lower]}`;
+	}
+	// Partial match: check if the payee name starts with a known key
+	for (const [key, domain] of Object.entries(PAYEE_DOMAINS)) {
+		if (lower.startsWith(key)) {
+			return `https://logo.clearbit.com/${domain}`;
+		}
+	}
+	return null;
+};
+
 // Smaller batches to stay under output size limits.
 // Transactions have many properties + relations, so they need the smallest batch.
 const PAYEE_PAGE_SIZE = 50;
@@ -351,15 +474,21 @@ worker.sync("ynabCategoryGroupsSync", {
 	execute: async () => {
 		const groups = await fetchCategoryGroups();
 
-		const changes = groups.map((group) => ({
-			type: "upsert" as const,
-			key: group.id,
-			properties: {
-				"Group ID": Builder.richText(group.id),
-				Group: Builder.title(group.name),
-				Hidden: Builder.checkbox(group.hidden),
-			},
-		}));
+		const changes = groups.map((group) => {
+			const emojiResult = extractLeadingEmoji(group.name);
+			return {
+				type: "upsert" as const,
+				key: group.id,
+				properties: {
+					"Group ID": Builder.richText(group.id),
+					Group: Builder.title(emojiResult ? emojiResult.rest : group.name),
+					Hidden: Builder.checkbox(group.hidden),
+				},
+				...(emojiResult
+					? { icon: Builder.emojiIcon(emojiResult.emoji) }
+					: {}),
+			};
+		});
 
 		return { changes, hasMore: false };
 	},
@@ -442,6 +571,8 @@ worker.sync("ynabCategoriesSync", {
 				props.Note = Builder.richText(cat.note);
 			}
 
+			const emojiResult = extractLeadingEmoji(cat.name);
+
 			return {
 				type: "upsert" as const,
 				key: cat.id,
@@ -450,6 +581,9 @@ worker.sync("ynabCategoriesSync", {
 					...props,
 					"Category Group": [Builder.relation(cat.category_group_id)],
 				},
+				...(emojiResult
+					? { icon: Builder.emojiIcon(emojiResult.emoji) }
+					: {}),
 			};
 		});
 
@@ -481,17 +615,21 @@ worker.sync("ynabPayeesSync", {
 		const batch = allPayees.slice(offset, offset + PAYEE_PAGE_SIZE);
 		const hasMore = offset + PAYEE_PAGE_SIZE < allPayees.length;
 
-		const changes = batch.map((payee) => ({
-			type: "upsert" as const,
-			key: payee.id,
-			properties: {
-				"Payee ID": Builder.richText(payee.id),
-				Payee: Builder.title(payee.name),
-				"Is Transfer": Builder.checkbox(
-					payee.transfer_account_id != null,
-				),
-			},
-		}));
+		const changes = batch.map((payee) => {
+			const logoUrl = getPayeeLogoUrl(payee.name);
+			return {
+				type: "upsert" as const,
+				key: payee.id,
+				properties: {
+					"Payee ID": Builder.richText(payee.id),
+					Payee: Builder.title(payee.name),
+					"Is Transfer": Builder.checkbox(
+						payee.transfer_account_id != null,
+					),
+				},
+				...(logoUrl ? { icon: Builder.imageIcon(logoUrl) } : {}),
+			};
+		});
 
 		return {
 			changes,
