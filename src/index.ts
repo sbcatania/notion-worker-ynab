@@ -164,13 +164,16 @@ async function fetchAccounts(): Promise<YnabAccount[]> {
 	return data.accounts.filter((a) => !a.deleted);
 }
 
-async function fetchCategories(): Promise<YnabCategory[]> {
+async function fetchCategoryGroups(): Promise<YnabCategoryGroup[]> {
 	const data = await ynabRequest<{ category_groups: YnabCategoryGroup[] }>(
 		`/budgets/${getBudgetId()}/categories`,
 	);
-	return data.category_groups
-		.filter((g) => !g.deleted)
-		.flatMap((g) => g.categories.filter((c) => !c.deleted));
+	return data.category_groups.filter((g) => !g.deleted);
+}
+
+async function fetchCategories(): Promise<YnabCategory[]> {
+	const groups = await fetchCategoryGroups();
+	return groups.flatMap((g) => g.categories.filter((c) => !c.deleted));
 }
 
 async function fetchTransactions(): Promise<YnabTransaction[]> {
@@ -238,7 +241,10 @@ const humanizeGoalType = (type: string | null): string | null => {
 	return map[type] ?? type;
 };
 
-const PAGE_SIZE = 100;
+// Smaller batches to stay under output size limits.
+// Transactions have many properties + relations, so they need the smallest batch.
+const PAYEE_PAGE_SIZE = 50;
+const TXN_PAGE_SIZE = 20;
 
 type PaginationState = { offset: number };
 
@@ -326,7 +332,41 @@ worker.sync("ynabAccountsSync", {
 });
 
 // ---------------------------------------------------------------------------
-// Sync: Categories
+// Sync: Category Groups
+// ---------------------------------------------------------------------------
+
+worker.sync("ynabCategoryGroupsSync", {
+	primaryKeyProperty: "Group ID",
+	mode: "replace",
+	schedule: "1d",
+	schema: {
+		defaultName: "YNAB Category Groups",
+		databaseIcon: Builder.notionIcon("categories"),
+		properties: {
+			Group: Schema.title(),
+			"Group ID": Schema.richText(),
+			Hidden: Schema.checkbox(),
+		},
+	},
+	execute: async () => {
+		const groups = await fetchCategoryGroups();
+
+		const changes = groups.map((group) => ({
+			type: "upsert" as const,
+			key: group.id,
+			properties: {
+				"Group ID": Builder.richText(group.id),
+				Group: Builder.title(group.name),
+				Hidden: Builder.checkbox(group.hidden),
+			},
+		}));
+
+		return { changes, hasMore: false };
+	},
+});
+
+// ---------------------------------------------------------------------------
+// Sync: Categories (with relation to Category Groups)
 // ---------------------------------------------------------------------------
 
 worker.sync("ynabCategoriesSync", {
@@ -339,7 +379,8 @@ worker.sync("ynabCategoriesSync", {
 		properties: {
 			Category: Schema.title(),
 			"Category ID": Schema.richText(),
-			Group: Schema.richText(),
+			"Category Group": Schema.relation("ynabCategoryGroupsSync"),
+			"Group Name": Schema.richText(),
 			Hidden: Schema.checkbox(),
 			Budgeted: Schema.number(),
 			Activity: Schema.number(),
@@ -365,7 +406,7 @@ worker.sync("ynabCategoriesSync", {
 			const props: Record<string, TextValue> = {
 				Category: Builder.title(cat.name),
 				"Category ID": Builder.richText(cat.id),
-				Group: Builder.richText(cat.category_group_name),
+				"Group Name": Builder.richText(cat.category_group_name),
 				Hidden: Builder.checkbox(cat.hidden),
 				Budgeted: Builder.number(milliunitsToAmount(cat.budgeted)),
 				Activity: Builder.number(milliunitsToAmount(cat.activity)),
@@ -404,6 +445,7 @@ worker.sync("ynabCategoriesSync", {
 				properties: {
 					"Category ID": props["Category ID"],
 					...props,
+					"Category Group": [Builder.relation(cat.category_group_id)],
 				},
 			};
 		});
@@ -413,7 +455,7 @@ worker.sync("ynabCategoriesSync", {
 });
 
 // ---------------------------------------------------------------------------
-// Sync: Payees
+// Sync: Payees (paginated — batches of 50)
 // ---------------------------------------------------------------------------
 
 worker.sync("ynabPayeesSync", {
@@ -429,27 +471,35 @@ worker.sync("ynabPayeesSync", {
 			"Is Transfer": Schema.checkbox(),
 		},
 	},
-	execute: async () => {
-		const payees = await fetchPayees();
+	execute: async (state: PaginationState | undefined) => {
+		const offset = state?.offset ?? 0;
+		const allPayees = await fetchPayees();
 
-		const changes = payees.map((payee) => ({
+		const batch = allPayees.slice(offset, offset + PAYEE_PAGE_SIZE);
+		const hasMore = offset + PAYEE_PAGE_SIZE < allPayees.length;
+
+		const changes = batch.map((payee) => ({
 			type: "upsert" as const,
 			key: payee.id,
 			properties: {
-				Payee: Builder.title(payee.name),
 				"Payee ID": Builder.richText(payee.id),
+				Payee: Builder.title(payee.name),
 				"Is Transfer": Builder.checkbox(
 					payee.transfer_account_id != null,
 				),
 			},
 		}));
 
-		return { changes, hasMore: false };
+		return {
+			changes,
+			hasMore,
+			nextState: hasMore ? { offset: offset + PAYEE_PAGE_SIZE } : undefined,
+		};
 	},
 });
 
 // ---------------------------------------------------------------------------
-// Sync: Transactions (paginated — batches of 100)
+// Sync: Transactions (paginated — batches of 20)
 // ---------------------------------------------------------------------------
 
 worker.sync("ynabTransactionsSync", {
@@ -493,11 +543,11 @@ worker.sync("ynabTransactionsSync", {
 		const offset = state?.offset ?? 0;
 
 		// YNAB returns all transactions in one call (no server-side pagination).
-		// We paginate locally in batches of 100 for the sync runtime.
+		// We paginate locally in small batches to stay under output size limits.
 		const allTransactions = await fetchTransactions();
 
-		const batch = allTransactions.slice(offset, offset + PAGE_SIZE);
-		const hasMore = offset + PAGE_SIZE < allTransactions.length;
+		const batch = allTransactions.slice(offset, offset + TXN_PAGE_SIZE);
+		const hasMore = offset + TXN_PAGE_SIZE < allTransactions.length;
 
 		const changes = batch.map((txn) => {
 			const amount = milliunitsToAmount(txn.amount);
@@ -553,7 +603,7 @@ worker.sync("ynabTransactionsSync", {
 		return {
 			changes,
 			hasMore,
-			nextState: hasMore ? { offset: offset + PAGE_SIZE } : undefined,
+			nextState: hasMore ? { offset: offset + TXN_PAGE_SIZE } : undefined,
 		};
 	},
 });
