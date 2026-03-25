@@ -379,7 +379,10 @@ worker.sync("ynabCategoriesSync", {
 		properties: {
 			Category: Schema.title(),
 			"Category ID": Schema.richText(),
-			"Category Group": Schema.relation("ynabCategoryGroupsSync"),
+			"Category Group": Schema.relation("ynabCategoryGroupsSync", {
+				twoWay: true,
+				relatedPropertyName: "Categories",
+			}),
 			"Group Name": Schema.richText(),
 			Hidden: Schema.checkbox(),
 			Budgeted: Schema.number(),
@@ -529,9 +532,18 @@ worker.sync("ynabTransactionsSync", {
 				{ name: "Blue", color: "blue" },
 				{ name: "Purple", color: "purple" },
 			]),
-			Account: Schema.relation("ynabAccountsSync"),
-			Payee: Schema.relation("ynabPayeesSync"),
-			Category: Schema.relation("ynabCategoriesSync"),
+			Account: Schema.relation("ynabAccountsSync", {
+				twoWay: true,
+				relatedPropertyName: "Transactions",
+			}),
+			Payee: Schema.relation("ynabPayeesSync", {
+				twoWay: true,
+				relatedPropertyName: "Transactions",
+			}),
+			Category: Schema.relation("ynabCategoriesSync", {
+				twoWay: true,
+				relatedPropertyName: "Transactions",
+			}),
 			"Account Name": Schema.richText(),
 			"Payee Name": Schema.richText(),
 			"Category Name": Schema.richText(),
