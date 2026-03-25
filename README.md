@@ -1,294 +1,203 @@
-# Notion Workers [alpha]
+# YNAB → Notion Sync Worker
 
-A worker is a small Node/TypeScript program hosted by Notion that you can use
-to build tool calls for Notion custom agents.
+A [Notion Worker](https://developers.notion.com/docs/workers) that syncs your [YNAB (You Need A Budget)](https://www.ynab.com/) data into Notion databases. Accounts, categories, transactions, payees, monthly budgets — all kept in sync automatically, once a day.
 
-> [!WARNING]
->
-> This is an **extreme pre-release alpha** of Notion Workers. You probably
-> shouldn't use it for anything serious just yet. Also, it'll only be helpful
-> if you have access to Notion Custom Agents (and a workspace admin [opts in](https://www.notion.so/?target=ai)). We are still making breaking
-> changes to Notion Workers CLI, templates, and more. We aim to minimize
-> friction, but expect things to go wrong.
+![Notion Workers Alpha](https://img.shields.io/badge/Notion%20Workers-alpha-orange)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue)
+![Node.js](https://img.shields.io/badge/Node.js-22%2B-green)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
+## What It Does
+
+This worker creates **6 linked Notion databases** from your YNAB budget:
+
+| Database | What's In It |
+|----------|-------------|
+| **YNAB Accounts** | Bank accounts, credit cards, balances, reconciliation dates |
+| **YNAB Category Groups** | Top-level budget groupings (e.g. "Bills", "Savings Goals") |
+| **YNAB Categories** | Individual budget categories with goals, funding, and balances |
+| **YNAB Payees** | Where your money goes, with emoji icons for known brands |
+| **YNAB Transactions** | Every transaction with amount, date, payee, category, and flags |
+| **YNAB Monthly Budgets** | Monthly summaries: income, budgeted, activity, age of money |
+
+All databases are **relationally linked** — transactions point to their account, payee, and category; categories point to their group. This means you can build Notion views that roll up spending by category, filter transactions by account, and more.
+
+### Features
+
+- **Daily sync** — runs automatically every 24 hours
+- **Full replace** — always reflects the current state of your YNAB budget
+- **USD formatting** — YNAB milliunits converted to proper dollar amounts
+- **Emoji icons** — known payees (Amazon, Starbucks, Netflix, etc.) get recognizable emoji icons; YNAB categories with leading emoji preserve them
+- **Two-way relations** — navigate between transactions, accounts, categories, and payees in Notion
+- **Pagination** — handles large transaction histories without hitting size limits
+
+## Prerequisites
+
+- A **Notion workspace** with access to [Notion Custom Agents](https://www.notion.so/?target=ai) (requires workspace admin opt-in)
+- A **YNAB account** with a [Personal Access Token](https://app.ynab.com/settings/developer)
+- **Node.js 22+** and **npm 10.9.2+**
+- The **`ntn` CLI** (Notion's worker management tool)
 
 ## Quick Start
 
-Install the `ntn` CLI:
+### 1. Install the NTN CLI
 
 ```shell
 npm i -g ntn
+ntn login
 ```
 
-Scaffold a new worker:
+### 2. Clone and install
 
 ```shell
-ntn workers new
-# Follow the prompts to scaffold your worker
-cd my-worker
+git clone https://github.com/sbcatania/worker-ynab.git
+cd worker-ynab
+npm install
 ```
 
-You'll find a `Hello, world` example in `src/index.ts`:
+### 3. Get your YNAB Personal Access Token
 
-```ts
-import { Worker } from "@notionhq/workers";
-import { j } from "@notionhq/workers/schema-builder";
+1. Go to [YNAB Developer Settings](https://app.ynab.com/settings/developer)
+2. Click **New Token**
+3. Copy the token
 
-const worker = new Worker();
-export default worker;
-
-worker.tool("sayHello", {
-	title: "Say Hello",
-	description: "Returns a friendly greeting for the given name.",
-	schema: j.object({
-		name: j.string().describe("The name to greet."),
-	}),
-	execute: ({ name }) => `Hello, ${name}!`,
-});
-```
-
-Deploy your worker:
+### 4. Configure secrets
 
 ```shell
-ntn workers deploy
+# Store your YNAB token as a worker secret
+ntn workers env set YNAB_ACCESS_TOKEN=your-token-here
+
+# Optional: target a specific budget (defaults to your last-used budget)
+ntn workers env set YNAB_BUDGET_ID=your-budget-id
 ```
 
-In Notion, add the tool call to your agent:
-
-![Adding a custom tool to your Notion agent](docs/custom-tool.png)
-
-## Authentication & Secrets
-
-If your worker needs to access third-party systems, use secrets for API keys and OAuth for user authorization flows.
-
-### Secrets
-
-Store API keys and credentials with the `secrets` command:
-
-```shell
-ntn workers env set TWILIO_AUTH_TOKEN=your-token-here
-ntn workers env set OPENWEATHER_API_KEY=abc123
-```
-
-For local development, pull the secrets to a `.env` file:
+For local development, pull secrets to a `.env` file:
 
 ```shell
 ntn workers env pull
 ```
 
-Access them in your code via `process.env`:
-
-```ts
-const apiKey = process.env.OPENWEATHER_API_KEY;
-```
-
-### OAuth
-
-For services requiring user authorization (GitHub, Google, etc.), set up OAuth:
-
-```ts
-worker.oauth("githubAuth", {
-	name: "github-oauth",
-	authorizationEndpoint: "https://github.com/login/oauth/authorize",
-	tokenEndpoint: "https://github.com/login/oauth/access_token",
-	scope: "repo user",
-	clientId: process.env.GITHUB_CLIENT_ID ?? "",
-	clientSecret: process.env.GITHUB_CLIENT_SECRET ?? "",
-});
-```
-
-After deploying, get your redirect URL and add it to your OAuth provider's app settings:
+### 5. Deploy
 
 ```shell
-ntn workers oauth show-redirect-url
-```
-
-Then start the OAuth flow:
-
-```shell
-ntn workers oauth start githubAuth
-```
-
-Use the token in your tools:
-
-```ts
-worker.tool("getGitHubRepos", {
-	title: "Get GitHub Repos",
-	description: "Fetch user's GitHub repositories",
-	schema: j.object({}),
-	execute: async () => {
-		const token = await githubAuth.accessToken();
-		const response = await fetch("https://api.github.com/user/repos", {
-			headers: { Authorization: `Bearer ${token}` },
-		});
-		return response.json();
-	},
-});
-```
-
-## What you can build
-
-<details open>
-<summary><strong>Give Agents a phone with Twilio</strong></summary>
-
-```ts
-worker.tool("sendSMS", {
-	title: "Send SMS",
-	description: "Send a text message to a phone number",
-	schema: j.object({
-		to: j.string().describe("Phone number in E.164 format"),
-		message: j.string().describe("Message to send"),
-	}),
-	execute: async ({ to, message }) => {
-		const response = await fetch(
-			`https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`,
-			{
-				method: "POST",
-				headers: {
-					Authorization: `Basic ${Buffer.from(
-						`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`,
-					).toString("base64")}`,
-					"Content-Type": "application/x-www-form-urlencoded",
-				},
-				body: new URLSearchParams({
-					To: to,
-					From: process.env.TWILIO_PHONE_NUMBER ?? "",
-					Body: message,
-				}),
-			},
-		);
-
-		if (!response.ok) throw new Error(`Twilio API error: ${response.statusText}`);
-		return "Message sent successfully";
-	},
-});
-```
-
-</details>
-
-<details>
-<summary><strong>Post to Discord, WhatsApp, and Teams</strong></summary>
-
-```ts
-worker.tool("postToDiscord", {
-	title: "Post to Discord",
-	description: "Send a message to a Discord channel",
-	schema: j.object({
-		message: j.string().describe("Message to post"),
-	}),
-	execute: async ({ message }) => {
-		const response = await fetch(process.env.DISCORD_WEBHOOK_URL ?? "", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ content: message }),
-		});
-
-		if (!response.ok) throw new Error(`Discord API error: ${response.statusText}`);
-		return "Posted to Discord";
-	},
-});
-```
-
-</details>
-
-<details>
-<summary><strong>Turn a Notion Page into a Podcast with ElevenLabs</strong></summary>
-
-```ts
-worker.tool("createPodcast", {
-	title: "Create Podcast from Page",
-	description: "Convert page content to audio using ElevenLabs",
-	schema: j.object({
-		content: j.string().describe("Page content to convert"),
-		voiceId: j.string().describe("ElevenLabs voice ID"),
-	}),
-	execute: async ({ content, voiceId }) => {
-		const response = await fetch(
-			`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-			{
-				method: "POST",
-				headers: {
-					"xi-api-key": process.env.ELEVENLABS_API_KEY ?? "",
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({ text: content, model_id: "eleven_monolingual_v1" }),
-			},
-		);
-
-		if (!response.ok) throw new Error(`ElevenLabs API error: ${response.statusText}`);
-		const audioBuffer = await response.arrayBuffer();
-		return `Generated ${audioBuffer.byteLength} bytes of audio`;
-	},
-});
-```
-
-</details>
-
-<details>
-<summary><strong>Get live stocks, weather, and traffic</strong></summary>
-
-```ts
-worker.tool("getWeather", {
-	title: "Get Weather",
-	description: "Get current weather for a location",
-	schema: j.object({
-		location: j.string().describe("City name or zip code"),
-	}),
-	execute: async ({ location }) => {
-		const response = await fetch(
-			`https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(location)}&appid=${process.env.OPENWEATHER_API_KEY}&units=metric`,
-		);
-
-		if (!response.ok) throw new Error(`Weather API error: ${response.statusText}`);
-
-		const data = await response.json();
-		return `${data.name}: ${data.main.temp}°C, ${data.weather[0].description}`;
-	},
-});
-```
-</details>
-
-## Helpful CLI commands
-
-```shell
-# Deploy your worker to Notion
 ntn workers deploy
+```
 
-# Test a tool locally
-ntn workers exec <toolName>
+That's it. The worker will create the databases in your Notion workspace and start syncing daily.
 
-# Manage authentication
-ntn login
-ntn logout
+### 6. Monitor
 
-# Store API keys and secrets
-ntn workers env set API_KEY=your-secret
+```shell
+# Check sync status
+ntn workers sync status
 
-# View execution logs
+# View recent runs
+ntn workers runs list
+
+# Get logs for a specific run
 ntn workers runs logs <runId>
 
-# Start OAuth flow
-ntn workers oauth start <oauthName>
-
-# Show OAuth redirect URL (set this in your provider's app settings)
-ntn workers oauth show-redirect-url
-
-# Display help for all commands
-ntn --help
+# Force an immediate sync
+ntn workers sync force-run ynabAccountsSync
 ```
 
-## Local Development
+## Finding Your Budget ID
+
+If you have multiple budgets and want to target a specific one, you can find the budget ID in the YNAB app URL — it's the UUID after `/budgets/` in the address bar. For example:
+
+```
+https://app.ynab.com/abcd1234-5678-9abc-def0-123456789abc/budget
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                      This is your budget ID
+```
+
+If you don't set `YNAB_BUDGET_ID`, the worker uses your most recently accessed budget.
+
+## Customizing with AI Coding Agents
+
+This project is designed to be easy to fork and modify using AI coding tools like [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex](https://openai.com/index/codex/), [GitHub Copilot](https://github.com/features/copilot), or similar.
+
+### Getting started with an agent
+
+1. Fork this repo
+2. Open it in your preferred AI coding environment
+3. The `CLAUDE.md` file (symlinked from `.agents/INSTRUCTIONS.md`) provides project context that Claude Code and compatible agents will pick up automatically
+4. The `.examples/` directory contains patterns for each capability type
+
+### Common modifications to ask your agent for
+
+- **Add new properties** — "Add a `Running Balance` column to the transactions database that shows the cumulative balance"
+- **Change sync frequency** — "Make transactions sync every 6 hours instead of daily"
+- **Filter data** — "Only sync transactions from the last 90 days" or "Skip closed accounts"
+- **Add new syncs** — "Create a sync for scheduled transactions from YNAB"
+- **Custom emoji mappings** — "Add emoji icons for [your local stores]"
+- **Different currency** — "Format amounts in EUR instead of USD"
+- **Incremental sync** — "Switch from full replace to incremental sync using YNAB's server_knowledge for delta updates"
+
+### Project structure at a glance
+
+```
+src/index.ts          ← All sync definitions live here (single file)
+.agents/              ← Agent instructions (auto-loaded by Claude Code)
+.examples/            ← SDK usage patterns (sync, tool, OAuth, automation)
+.env.example          ← Required environment variables
+workers.json          ← NTN CLI configuration
+```
+
+The entire worker is a single `src/index.ts` file (~825 lines). Each sync is self-contained with its own schema, YNAB API call, and data mapping — easy to read, modify, or copy.
+
+## How It Works
+
+The worker uses the [YNAB API v1](https://api.ynab.com/v1) to fetch budget data and the [Notion Workers SDK](https://developers.notion.com/docs/workers) (`@notionhq/workers`) to define sync capabilities. Each sync:
+
+1. Fetches data from a YNAB API endpoint
+2. Maps YNAB fields to Notion database properties
+3. Returns rows as upsert operations keyed by YNAB IDs
+
+The Notion Workers runtime handles database creation, schema management, scheduling, and pagination.
+
+### YNAB API Endpoints Used
+
+| Endpoint | Sync |
+|----------|------|
+| `GET /budgets/{id}/accounts` | Accounts |
+| `GET /budgets/{id}/categories` | Category Groups + Categories |
+| `GET /budgets/{id}/transactions` | Transactions |
+| `GET /budgets/{id}/payees` | Payees |
+| `GET /budgets/{id}/months` | Monthly Budgets |
+
+## Development
 
 ```shell
-npm run check # type-check
-npm run build # emit dist/
+# Type-check
+npm run check
+
+# Build
+npm run build
+
+# Test a sync locally
+ntn workers exec ynabAccountsSync --local
+
+# Dry-run a sync (preview without writing to Notion)
+ntn workers sync dry-run ynabAccountsSync
+
+# Reset sync state and start fresh
+ntn workers sync state reset ynabAccountsSync
 ```
 
-Store secrets in `.env` for local development:
+## Links & References
 
-```shell
-ntn workers env pull
-```
+- **YNAB API Documentation** — https://api.ynab.com
+- **YNAB Developer Portal** — https://app.ynab.com/settings/developer
+- **Notion Workers Documentation** — https://developers.notion.com/docs/workers
+- **NTN CLI** — `npm i -g ntn` ([docs](https://developers.notion.com/docs/workers))
+- **Notion Developer Slack** — [Join here](https://join.slack.com/t/notiondevs/shared_invite/zt-3r1aq1t1s-hM2har7iqfOfHJRrH9PHww)
+- **Notion Workers SDK** — `@notionhq/workers` ([npm](https://www.npmjs.com/package/@notionhq/workers))
 
-## Have a question?
+## Note on Availability
 
-Join the [Notion Dev Slack](https://join.slack.com/t/notiondevs/shared_invite/zt-3r1aq1t1s-hM2har7iqfOfHJRrH9PHww)!
+Notion Workers is currently in **alpha**. The sync capability used by this worker is in **private alpha** — you'll need access to Notion Custom Agents and the sync feature to use it. The SDK and CLI may have breaking changes. See `README.ntn.md` in this repo for the latest Notion Workers SDK documentation.
+
+## License
+
+MIT
