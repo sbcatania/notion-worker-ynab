@@ -12,6 +12,11 @@ export default worker;
 
 const YNAB_BASE_URL = "https://api.ynab.com/v1";
 
+/** Maximum retry attempts for transient YNAB API failures. */
+const MAX_RETRIES = 3;
+/** Base delay in ms for exponential backoff (doubles each retry). */
+const RETRY_BASE_DELAY_MS = 1000;
+
 const requireEnv = (name: string): string => {
 	const value = process.env[name];
 	if (!value) {
@@ -19,6 +24,7 @@ const requireEnv = (name: string): string => {
 	}
 	return value;
 };
+
 
 /** YNAB monetary values are in milliunits (1000 = $1.00). */
 const milliunitsToAmount = (milliunits: number): number =>
@@ -135,26 +141,43 @@ type YnabMonthSummary = {
 
 async function ynabRequest<T>(path: string): Promise<T> {
 	const token = requireEnv("YNAB_ACCESS_TOKEN");
-	const response = await fetch(`${YNAB_BASE_URL}${path}`, {
-		headers: {
-			Authorization: `Bearer ${token}`,
-			Accept: "application/json",
-		},
-	});
 
-	if (!response.ok) {
-		const details = await response.text();
-		throw new Error(
-			`YNAB API request failed (${response.status}) for ${path}: ${details}`,
+	let lastError: Error | undefined;
+	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+		if (attempt > 0) {
+			const delay = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+			await new Promise((resolve) => setTimeout(resolve, delay));
+		}
+
+		const response = await fetch(`${YNAB_BASE_URL}${path}`, {
+			headers: {
+				Authorization: `Bearer ${token}`,
+				Accept: "application/json",
+			},
+		});
+
+		if (response.ok) {
+			const json = (await response.json()) as { data: T };
+			return json.data;
+		}
+
+		// Don't retry client errors (4xx) other than 429 (rate limit)
+		const isRetryable =
+			response.status === 429 || response.status >= 500;
+
+		// Sanitize: never include response body in errors (may contain sensitive data)
+		lastError = new Error(
+			`YNAB API error ${response.status} for ${path}`,
 		);
+
+		if (!isRetryable) break;
 	}
 
-	const json = (await response.json()) as { data: T };
-	return json.data;
+	throw lastError ?? new Error(`YNAB API request failed for ${path}`);
 }
 
 function getBudgetId(): string {
-	return process.env.YNAB_BUDGET_ID ?? "last-used";
+	return requireEnv("YNAB_BUDGET_ID");
 }
 
 async function fetchAccounts(): Promise<YnabAccount[]> {
@@ -195,6 +218,17 @@ async function fetchMonths(): Promise<YnabMonthSummary[]> {
 		`/budgets/${getBudgetId()}/months`,
 	);
 	return data.months.filter((m) => !m.deleted);
+}
+
+/** Validate and sanitize pagination state. */
+function validatePaginationState(
+	state: PaginationState | undefined,
+): number {
+	const offset = state?.offset ?? 0;
+	if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0) {
+		return 0;
+	}
+	return offset;
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +647,7 @@ worker.sync("ynabPayeesSync", {
 		},
 	},
 	execute: async (state: PaginationState | undefined) => {
-		const offset = state?.offset ?? 0;
+		const offset = validatePaginationState(state);
 		const allPayees = await fetchPayees();
 
 		const batch = allPayees.slice(offset, offset + PAYEE_PAGE_SIZE);
@@ -693,7 +727,7 @@ worker.sync("ynabTransactionsSync", {
 		},
 	},
 	execute: async (state: PaginationState | undefined) => {
-		const offset = state?.offset ?? 0;
+		const offset = validatePaginationState(state);
 
 		// YNAB returns all transactions in one call (no server-side pagination).
 		// We paginate locally in small batches to stay under output size limits.
@@ -818,6 +852,106 @@ worker.sync("ynabMonthsSync", {
 				},
 			};
 		});
+
+		return { changes, hasMore: false };
+	},
+});
+
+// ---------------------------------------------------------------------------
+// Sync: Audit Log (separate Notion DB for security audit trail)
+// ---------------------------------------------------------------------------
+
+/** Endpoints probed by the audit log sync. */
+const AUDIT_ENDPOINTS = [
+	{ syncName: "ynabAccountsSync", path: () => `/budgets/${getBudgetId()}/accounts`, countKey: "accounts" },
+	{ syncName: "ynabCategoryGroupsSync", path: () => `/budgets/${getBudgetId()}/categories`, countKey: "category_groups" },
+	{ syncName: "ynabPayeesSync", path: () => `/budgets/${getBudgetId()}/payees`, countKey: "payees" },
+	{ syncName: "ynabTransactionsSync", path: () => `/budgets/${getBudgetId()}/transactions`, countKey: "transactions" },
+	{ syncName: "ynabMonthsSync", path: () => `/budgets/${getBudgetId()}/months`, countKey: "months" },
+] as const;
+
+worker.sync("ynabAuditLogSync", {
+	primaryKeyProperty: "Entry ID",
+	mode: "incremental",
+	schedule: "1d",
+	schema: {
+		defaultName: "YNAB Sync Audit Log",
+		databaseIcon: Builder.emojiIcon("🔒"),
+		properties: {
+			Event: Schema.title(),
+			"Entry ID": Schema.richText(),
+			Timestamp: Schema.date(),
+			"Sync Name": Schema.select([
+				{ name: "ynabAccountsSync" },
+				{ name: "ynabCategoryGroupsSync" },
+				{ name: "ynabCategoriesSync" },
+				{ name: "ynabPayeesSync" },
+				{ name: "ynabTransactionsSync" },
+				{ name: "ynabMonthsSync" },
+			]),
+			Status: Schema.select([
+				{ name: "Success", color: "green" },
+				{ name: "Error", color: "red" },
+			]),
+			"Record Count": Schema.number(),
+			"Duration (ms)": Schema.number(),
+			Endpoint: Schema.richText(),
+			Error: Schema.richText(),
+		},
+	},
+	execute: async () => {
+		const now = new Date().toISOString();
+		const changes = [];
+
+		for (const ep of AUDIT_ENDPOINTS) {
+			const endpoint = ep.path();
+			const start = Date.now();
+			let status: "success" | "error" = "success";
+			let recordCount = 0;
+			let errorMsg: string | undefined;
+
+			try {
+				const data = await ynabRequest<Record<string, unknown[]>>(endpoint);
+				const items = data[ep.countKey];
+				recordCount = Array.isArray(items) ? items.length : 0;
+			} catch (err) {
+				status = "error";
+				errorMsg = err instanceof Error ? err.message : String(err);
+			}
+
+			const durationMs = Date.now() - start;
+			const id = `${ep.syncName}-${now}`;
+			const statusLabel = status === "success" ? "Success" : "Error";
+			const title = `${statusLabel}: ${ep.syncName} (${recordCount} records)`;
+
+			const props: Record<string, TextValue> = {
+				Event: Builder.title(title),
+				"Entry ID": Builder.richText(id),
+				Timestamp: Builder.dateTime(now),
+				"Sync Name": Builder.select(ep.syncName),
+				Status: Builder.select(statusLabel),
+				"Record Count": Builder.number(recordCount),
+				"Duration (ms)": Builder.number(durationMs),
+				Endpoint: Builder.richText(endpoint),
+			};
+
+			if (errorMsg) {
+				props.Error = Builder.richText(errorMsg);
+			}
+
+			changes.push({
+				type: "upsert" as const,
+				key: id,
+				properties: {
+					"Entry ID": props["Entry ID"],
+					...props,
+				},
+				icon:
+					status === "success"
+						? Builder.emojiIcon("✅")
+						: Builder.emojiIcon("❌"),
+			});
+		}
 
 		return { changes, hasMore: false };
 	},

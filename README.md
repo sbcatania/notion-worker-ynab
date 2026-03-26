@@ -9,7 +9,7 @@ A [Notion Worker](https://developers.notion.com/docs/workers) that syncs your [Y
 
 ## What It Does
 
-This worker creates **6 linked Notion databases** from your YNAB budget:
+This worker creates **7 linked Notion databases** from your YNAB budget:
 
 | Database | What's In It |
 |----------|-------------|
@@ -19,6 +19,7 @@ This worker creates **6 linked Notion databases** from your YNAB budget:
 | **YNAB Payees** | Where your money goes, with emoji icons for known brands |
 | **YNAB Transactions** | Every transaction with amount, date, payee, category, and flags |
 | **YNAB Monthly Budgets** | Monthly summaries: income, budgeted, activity, age of money |
+| **YNAB Sync Audit Log** | Security audit trail: API calls, status, record counts, errors |
 
 All databases are **relationally linked** — transactions point to their account, payee, and category; categories point to their group. This means you can build Notion views that roll up spending by category, filter transactions by account, and more.
 
@@ -67,7 +68,7 @@ npm install
 # Store your YNAB token as a worker secret
 ntn workers env set YNAB_ACCESS_TOKEN=your-token-here
 
-# Optional: target a specific budget (defaults to your last-used budget)
+# Required: target a specific budget (find the ID in your YNAB app URL)
 ntn workers env set YNAB_BUDGET_ID=your-budget-id
 ```
 
@@ -111,7 +112,7 @@ https://app.ynab.com/abcd1234-5678-9abc-def0-123456789abc/budget
                       This is your budget ID
 ```
 
-If you don't set `YNAB_BUDGET_ID`, the worker uses your most recently accessed budget.
+You **must** set `YNAB_BUDGET_ID` — the worker will fail if it's missing to prevent accidentally syncing the wrong budget.
 
 ## Customizing with AI Coding Agents
 
@@ -193,6 +194,41 @@ ntn workers sync state reset ynabAccountsSync
 - **NTN CLI** — `npm i -g ntn` ([docs](https://developers.notion.com/docs/workers))
 - **Notion Developer Slack** — [Join here](https://join.slack.com/t/notiondevs/shared_invite/zt-3r1aq1t1s-hM2har7iqfOfHJRrH9PHww)
 - **Notion Workers SDK** — `@notionhq/workers` ([npm](https://www.npmjs.com/package/@notionhq/workers))
+
+## Security
+
+This worker handles **sensitive financial data**. Please review these considerations:
+
+### Token Security
+
+- Your YNAB Personal Access Token grants **full read access to ALL budgets** on your YNAB account, not just the one you configure. YNAB does not support scoped tokens.
+- Tokens **do not expire** — a leaked token remains valid until you manually revoke it at [YNAB Developer Settings](https://app.ynab.com/settings/developer).
+- **Rotate your token periodically** (recommended: every 90 days). Revoke the old token in YNAB, create a new one, and update via `ntn workers env set`.
+- Never commit tokens to git. The `.gitignore` excludes `.env` files, but stay vigilant.
+
+### Data Classification
+
+All synced data is personally identifiable financial information (PII):
+- Account balances and types
+- Every transaction (amounts, merchants, dates, memos)
+- Budget allocations and spending patterns
+
+**Share your Notion databases only with trusted individuals.** Notion encrypts data in transit and at rest (SOC 2 Type II, ISO 27001), but access control is your responsibility.
+
+### Audit Logging
+
+The worker includes a built-in audit log sync (`ynabAuditLogSync`) that records every API call to a separate **YNAB Sync Audit Log** database in Notion. Each entry includes:
+- Timestamp, sync name, and YNAB API endpoint called
+- Success/error status and error messages (sanitized — no tokens or response bodies)
+- Record counts and response times
+
+Use this to detect anomalies, verify sync completeness, and maintain a compliance trail.
+
+### Error Handling
+
+- API errors are **sanitized** — error messages include only the HTTP status code and endpoint path, never response bodies (which could contain sensitive data).
+- Transient failures (5xx, 429 rate limits) are retried up to 3 times with exponential backoff.
+- Client errors (4xx other than 429) fail immediately.
 
 ## Note on Availability
 
