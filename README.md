@@ -122,7 +122,7 @@ This project is designed to be easy to fork and modify using AI coding tools lik
 
 1. Fork this repo
 2. Open it in your preferred AI coding environment
-3. The `CLAUDE.md` file (symlinked from `.agents/INSTRUCTIONS.md`) provides project context that Claude Code and compatible agents will pick up automatically
+3. The `AGENTS.md` file (symlinked from `.agents/INSTRUCTIONS.md`) provides project context that Claude Code, Codex, and other agents will pick up automatically
 4. The `.examples/` directory contains patterns for each capability type
 
 ### Common modifications to ask your agent for
